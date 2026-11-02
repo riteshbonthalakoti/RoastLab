@@ -48,8 +48,10 @@ export function getProviders(): Provider[] {
       model: 'meta-llama/llama-4-scout-17b-16e-instruct',
       supportsVision: true,
     },
-    // OpenRouter free vision models — verified free + image-capable (Nov 2026).
-    // llama-4-*:free went paid; these are the current actually-free vision models.
+    // OpenRouter free vision models — verified live against GET /api/v1/models
+    // on 2026-11-02. qwen2.5-vl-7b, nemotron-nano-12b-v2-vl and
+    // llama-3.2-11b-vision-instruct were all retired/renamed and had been
+    // returning "not a valid model ID" on every request.
     {
       name: 'openrouter-gemma',
       client: makeClient('https://openrouter.ai/api/v1', process.env.OPENROUTER_KEY_1 ?? '', OPENROUTER_HEADERS),
@@ -59,20 +61,19 @@ export function getProviders(): Provider[] {
     {
       name: 'openrouter-nemotron',
       client: makeClient('https://openrouter.ai/api/v1', process.env.OPENROUTER_KEY_2 ?? '', OPENROUTER_HEADERS),
-      model: 'nvidia/nemotron-nano-12b-v2-vl:free',
+      model: 'nvidia/nemotron-3.5-super-vl:free',
       supportsVision: true,
     },
-    // Vision-capable free fallbacks — verified free + image-capable
     {
-      name: 'openrouter-qwen',
+      name: 'openrouter-gemma-31b',
       client: makeClient('https://openrouter.ai/api/v1', process.env.OPENROUTER_KEY_1 ?? '', OPENROUTER_HEADERS),
-      model: 'qwen/qwen2.5-vl-7b-instruct:free',
+      model: 'google/gemma-4-31b-it:free',
       supportsVision: true,
     },
     {
-      name: 'openrouter-llama-vision',
+      name: 'openrouter-inkling',
       client: makeClient('https://openrouter.ai/api/v1', process.env.OPENROUTER_KEY_2 ?? '', OPENROUTER_HEADERS),
-      model: 'meta-llama/llama-3.2-11b-vision-instruct:free',
+      model: 'thinkingmachines/inkling:free',
       supportsVision: true,
     },
   ].filter((p) => {
