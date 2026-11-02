@@ -85,11 +85,14 @@ export function getProviders(): Provider[] {
 /** True when worth trying next provider (rate limit, quota, server error, model not found, network). */
 export function isRetryableError(err: unknown): boolean {
   if (err instanceof OpenAI.APIError) {
+    // 400 = OpenRouter's "not a valid model ID" for a stale/retired free model
+    //       (OpenRouter returns 400 here, not 404, so this must stay retryable
+    //       or one bad model ID in the chain kills every audit outright)
     // 403 = quota exhausted on free tier (OpenRouter free models)
     // 404 = model not found on this provider
     // 429 = rate limit
     // 5xx = server error
-    return err.status === 403 || err.status === 404 || err.status === 429 || err.status >= 500;
+    return err.status === 400 || err.status === 403 || err.status === 404 || err.status === 429 || err.status >= 500;
   }
   // Network errors, timeouts, DNS failures — always retry next provider
   return true;
