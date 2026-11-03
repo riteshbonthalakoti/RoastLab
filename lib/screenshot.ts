@@ -1,5 +1,14 @@
 import { put } from '@vercel/blob';
 import sharp from 'sharp';
+import { getFirecrawl, downloadScreenshot } from './firecrawl';
+
+async function getFirecrawlShot(url: string): Promise<{ buffer: Buffer; screenshotUrl: string } | null> {
+  const fc = await getFirecrawl(url);
+  if (!fc?.screenshotUrl) return null;
+  const buffer = await downloadScreenshot(fc.screenshotUrl);
+  if (!buffer || await isBotBlockPage(buffer)) return null;
+  return { buffer, screenshotUrl: fc.screenshotUrl };
+}
 
 // Detect bot-block/403 pages: resize to 10x10, check if all pixels are nearly identical (uniform error page)
 async function isBotBlockPage(buf: Buffer): Promise<boolean> {
@@ -22,6 +31,21 @@ export async function captureScreenshot(url: string): Promise<{
   mimeType: 'image/jpeg';
   screenshotUrl: string;
 }> {
+  // Firecrawl (when configured): crop the hero (top 900px) out of its full-page capture.
+  const fcShot = await getFirecrawlShot(url);
+  if (fcShot) {
+    try {
+      const meta = await sharp(fcShot.buffer).metadata();
+      const hero = await sharp(fcShot.buffer)
+        .extract({ left: 0, top: 0, width: meta.width ?? 1280, height: Math.min(900, meta.height ?? 900) })
+        .jpeg({ quality: 85 })
+        .toBuffer();
+      return { base64: hero.toString('base64'), mimeType: 'image/jpeg', screenshotUrl: fcShot.screenshotUrl };
+    } catch {
+      // fall through to legacy capture
+    }
+  }
+
   // Primary: thum.io — no API key, free, reliable. 5s wait before capture.
   try {
     const thumUrl = `https://image.thum.io/get/width/1280/crop/900/noanimate/viewportwait/15000/${url}`;
@@ -117,16 +141,21 @@ export async function captureMultipleScreenshots(url: string): Promise<string[]>
     } catch { return null; }
   }
 
-  const [thumBuf, mlBuf] = await Promise.all([tryThum(), tryMicrolink()]);
+  // Firecrawl first (handles bot protection + JS rendering); legacy race only if it yields nothing.
+  const fcShot = await getFirecrawlShot(url);
+  let imageBuffer: Buffer | null = fcShot?.buffer ?? null;
 
-  // Pick the taller image (more of the page captured)
-  let imageBuffer: Buffer | null = null;
-  try {
-    const th = thumBuf ? (await sharp(thumBuf).metadata()).height ?? 0 : 0;
-    const mh = mlBuf ? (await sharp(mlBuf).metadata()).height ?? 0 : 0;
-    imageBuffer = th >= mh ? (thumBuf ?? mlBuf) : (mlBuf ?? thumBuf);
-  } catch {
-    imageBuffer = thumBuf ?? mlBuf;
+  if (!imageBuffer) {
+    const [thumBuf, mlBuf] = await Promise.all([tryThum(), tryMicrolink()]);
+
+    // Pick the taller image (more of the page captured)
+    try {
+      const th = thumBuf ? (await sharp(thumBuf).metadata()).height ?? 0 : 0;
+      const mh = mlBuf ? (await sharp(mlBuf).metadata()).height ?? 0 : 0;
+      imageBuffer = th >= mh ? (thumBuf ?? mlBuf) : (mlBuf ?? thumBuf);
+    } catch {
+      imageBuffer = thumBuf ?? mlBuf;
+    }
   }
 
   // Crop fullpage into non-overlapping 900px sections via Sharp, upload to Blob
@@ -178,7 +207,7 @@ export async function captureMultipleScreenshots(url: string): Promise<string[]>
   }
 
   // No Blob token — return fullpage URL directly
-  if (imageBuffer) return [thumFullUrl];
+  if (imageBuffer) return [fcShot?.screenshotUrl ?? thumFullUrl];
 
   // Last resort — two thum.io viewport crops (different crop heights = different sections)
   const thumBase = 'https://image.thum.io/get/width/1280/noanimate/viewportwait/15000';
@@ -196,6 +225,10 @@ export async function captureMultipleScreenshots(url: string): Promise<string[]>
  * Free, no API key, JS-rendered, strips nav/footer noise, fails gracefully.
  */
 export async function crawlPage(url: string): Promise<string> {
+  // Firecrawl markdown keeps nav/header/footer (CTAs, trust badges) that Jina's selector strips.
+  const fc = await getFirecrawl(url);
+  if (fc && fc.markdown.length > 200) return fc.markdown.slice(0, 10_000);
+
   const headers = {
     'Accept': 'text/markdown',
     'X-Return-Format': 'markdown',
@@ -238,15 +271,19 @@ export async function crawlPage(url: string): Promise<string> {
  */
 export async function extractSiteData(url: string): Promise<string> {
   try {
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml',
-      },
-      signal: AbortSignal.timeout(14_000),
-    });
-    if (!res.ok) return '';
-    const html = await res.text();
+    const fc = await getFirecrawl(url);
+    let html = fc?.rawHtml ?? '';
+    if (!html) {
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+        },
+        signal: AbortSignal.timeout(14_000),
+      });
+      if (!res.ok) return '';
+      html = await res.text();
+    }
 
     // Colors
     const hexColors = [...new Set([...html.matchAll(/#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b/g)].map(m => m[0]))].slice(0, 15);
@@ -288,6 +325,8 @@ export async function extractSiteData(url: string): Promise<string> {
     if (imgNoAlt > 0) lines.push(`Images missing alt text: ${imgNoAlt}`);
     if (imgEmptyAlt > 0) lines.push(`Images with empty alt="": ${imgEmptyAlt}`);
     if (navLinks.length) lines.push(`Internal paths found: ${navLinks.join(', ')}`);
+    if (fc?.branding) lines.push(`Detected branding (rendered page): ${JSON.stringify(fc.branding).slice(0, 1500)}`);
+    if (fc?.computedStyles) lines.push(`Computed styles of key elements (rendered, JSON): ${fc.computedStyles.slice(0, 3000)}`);
 
     return lines.join('\n');
   } catch {
