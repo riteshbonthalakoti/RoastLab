@@ -13,6 +13,8 @@ export type Provider = {
   supportsVision: boolean;
   /** Ask for response_format json_object (only set where the provider documents support). */
   jsonMode?: boolean;
+  /** Provider-specific request fields (e.g. Groq's reasoning controls). */
+  extraParams?: Record<string, unknown>;
 };
 
 /** Thrown when a model answers but not with usable audit JSON. */
@@ -37,6 +39,10 @@ function makeClient(baseURL: string, apiKey: string, extraHeaders?: Record<strin
   });
 }
 
+// Groq qwen/qwen3.8-27b: reasoning_effort "none" = instruct mode (no thinking, fast), and per Groq's
+// reasoning docs reasoning_format must be "hidden" or "parsed" with JSON mode ("raw" returns a 400).
+const GROQ_QWEN_PARAMS = { reasoning_effort: 'none', reasoning_format: 'hidden' };
+
 const OPENROUTER_HEADERS = {
   'HTTP-Referer': 'https://getroastlab.vercel.app',
   'X-Title': 'RoastLab',
@@ -49,6 +55,7 @@ interface ProviderConfig {
   model: string;
   headers?: Record<string, string>;
   jsonMode?: boolean;
+  extraParams?: Record<string, unknown>;
 }
 
 /**
@@ -65,8 +72,8 @@ interface ProviderConfig {
  */
 export function getProviders(): Provider[] {
   const configs: ProviderConfig[] = [
-    { name: 'groq-1', baseURL: 'https://api.groq.com/openai/v1', apiKey: process.env.GROQ_KEY_1 ?? '', model: 'qwen/qwen3.8-27b', jsonMode: true },
-    { name: 'groq-2', baseURL: 'https://api.groq.com/openai/v1', apiKey: process.env.GROQ_KEY_2 ?? '', model: 'qwen/qwen3.8-27b', jsonMode: true },
+    { name: 'groq-1', baseURL: 'https://api.groq.com/openai/v1', apiKey: process.env.GROQ_KEY_1 ?? '', model: 'qwen/qwen3.8-27b', jsonMode: true, extraParams: GROQ_QWEN_PARAMS },
+    { name: 'groq-2', baseURL: 'https://api.groq.com/openai/v1', apiKey: process.env.GROQ_KEY_2 ?? '', model: 'qwen/qwen3.8-27b', jsonMode: true, extraParams: GROQ_QWEN_PARAMS },
     { name: 'openrouter-gemma', baseURL: 'https://openrouter.ai/api/v1', apiKey: process.env.OPENROUTER_KEY_1 ?? '', model: 'google/gemma-4-26b-a4b-it:free', headers: OPENROUTER_HEADERS },
     { name: 'openrouter-nemotron', baseURL: 'https://openrouter.ai/api/v1', apiKey: process.env.OPENROUTER_KEY_2 ?? '', model: 'nvidia/nemotron-3.5-super-vl:free', headers: OPENROUTER_HEADERS },
     { name: 'openrouter-gemma-31b', baseURL: 'https://openrouter.ai/api/v1', apiKey: process.env.OPENROUTER_KEY_1 ?? '', model: 'google/gemma-4-31b-it:free', headers: OPENROUTER_HEADERS },
@@ -81,12 +88,16 @@ export function getProviders(): Provider[] {
       model: c.model,
       supportsVision: true,
       jsonMode: c.jsonMode,
+      extraParams: c.extraParams,
     }));
 }
 
 /** True when worth trying next provider (rate limit, quota, server error, model not found, network). */
 export function isRetryableError(err: unknown): boolean {
   if (err instanceof OpenAI.APIError) {
+    // No status = connection error or timeout (APIConnectionError/APIConnectionTimeoutError extend
+    // APIError with status undefined). Treating those as fatal let one slow provider kill the audit.
+    if (err.status === undefined) return true;
     // 400 = OpenRouter's "not a valid model ID" for a stale/retired free model
     //       (OpenRouter returns 400 here, not 404, so this must stay retryable
     //       or one bad model ID in the chain kills every audit outright)
@@ -113,6 +124,7 @@ export function cooldownMs(err: unknown): number {
   if (err instanceof UnusableOutputError) return 60_000;
   if (!(err instanceof OpenAI.APIError)) return 0;
   const status = err.status;
+  if (status === undefined) return 60_000; // timed out / unreachable: do not make every dimension wait for it again
   if (status === 404 || status === 401 || status === 403) return 30 * 60_000;
   if (status === 400) return 10 * 60_000;
   if (status === 429) {
@@ -171,6 +183,7 @@ export async function withFallback<T>(
         continue;
       }
       // Non-retryable (auth error, bad request) — fail fast
+      console.error(`[ai] ${provider.name} (${provider.model}) failed with a non-retryable error: ${describeError(err)}`);
       throw err;
     }
   }
