@@ -23,7 +23,12 @@ const PLANS = {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as { plan: 'pro' | 'full'; siteUrl?: string };
+    let body: { plan?: 'pro' | 'full'; siteUrl?: string };
+    try {
+      body = (await req.json()) as { plan?: 'pro' | 'full'; siteUrl?: string };
+    } catch {
+      return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+    }
     const { plan, siteUrl } = body;
 
     if (!plan || !PLANS[plan]) {
