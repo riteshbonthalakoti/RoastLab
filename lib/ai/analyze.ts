@@ -4,7 +4,7 @@
  * Uses withFallback so any provider failure auto-retries on next key.
  */
 
-import { withFallback, type Provider } from './providers';
+import { withFallback, UnusableOutputError, type Provider } from './providers';
 import { getSetting } from '../db';
 import type OpenAI from 'openai';
 
@@ -206,14 +206,21 @@ async function analyzeDimension(
   const response = await provider.client.chat.completions.create({
     model: provider.model,
     messages,
-    max_tokens: 1800,
+    max_tokens: 3000,
     temperature: 0.85,
+    ...(provider.jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
   });
 
-  const parsed = parseDimensionJson(response.choices[0]?.message?.content ?? '');
+  const choice = response.choices[0];
+  const content = choice?.message?.content ?? '';
+  const parsed = parseDimensionJson(content);
   if (!parsed) {
-    // Throwing (not returning a fake score) lets withFallback try the next provider.
-    throw new Error(`${provider.name} returned output that is not valid audit JSON`);
+    // Throwing (not returning a fake score) lets withFallback try the next provider. The snippet and
+    // finish_reason show whether the model was cut off, answered in prose, or put everything in reasoning.
+    const snippet = content.replace(/\s+/g, ' ').slice(0, 160);
+    throw new UnusableOutputError(
+      `${provider.name} returned output that is not valid audit JSON (finish_reason=${choice?.finish_reason ?? 'none'}, ${content.length} chars: "${snippet}")`,
+    );
   }
   parsed.dimension = dimension;
   return parsed;
@@ -241,6 +248,9 @@ export function parseDimensionJson(raw: string): DimensionResult | null {
 
 // ─── Full audit (all dimensions, with fallback per dimension) ─────────────────
 
+/** Stop starting new dimensions after this long (the route's maxDuration is 120s). */
+const AUDIT_TIME_BUDGET_MS = 85_000;
+
 export async function runAudit(params: {
   imageBase64: string;
   mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
@@ -261,9 +271,12 @@ export async function runAudit(params: {
   const results: DimensionResult[] = [];
   let lastProvider = 'unknown';
   let succeeded = 0;
+  const startedAt = Date.now();
 
   // Analyze dimensions sequentially to avoid hammering rate limits
   for (const dim of dimensions) {
+    // The route has a hard 120s limit. Past this point finish with the bits we have rather than get cut off.
+    if (succeeded > 0 && Date.now() - startedAt > AUDIT_TIME_BUDGET_MS) break;
     let result: DimensionResult;
     let providerUsed = lastProvider;
     try {
