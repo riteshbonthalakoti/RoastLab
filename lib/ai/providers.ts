@@ -99,6 +99,16 @@ export function isRetryableError(err: unknown): boolean {
   return true;
 }
 
+/** Status + short message for logs, with anything that looks like an API key redacted. */
+function describeError(err: unknown): string {
+  const status = err instanceof OpenAI.APIError ? err.status : undefined;
+  const msg = (err instanceof Error ? err.message : String(err))
+    .replace(/\b(?:gsk_|sk-|sk_|fc-)[\w-]{6,}/g, '[redacted]')
+    .replace(/\s+/g, ' ')
+    .slice(0, 200);
+  return `${status ?? 'no-status'} ${msg}`;
+}
+
 /**
  * Run fn with automatic fallback across providers.
  * Tries each provider in order; stops on first success.
@@ -117,7 +127,7 @@ export async function withFallback<T>(
     } catch (err) {
       lastErr = err;
       if (isRetryableError(err)) {
-        console.warn(`[ai] ${provider.name} rate-limited or error, trying next...`);
+        console.warn(`[ai] ${provider.name} (${provider.model}) failed: ${describeError(err)} — trying next`);
         continue;
       }
       // Non-retryable (auth error, bad request) — fail fast
