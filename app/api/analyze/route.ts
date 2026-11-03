@@ -18,6 +18,19 @@ const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? 'bonthalamadhavi1@gmail.com,ri
 export const runtime = 'nodejs';
 export const maxDuration = 120;
 
+// Provider/internal error text (model IDs, status codes) means nothing to users; log it, show something readable.
+function userFacingError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : '';
+  const status = (err as { status?: number } | null)?.status;
+  if (/screenshot|microlink/i.test(msg)) {
+    return "We couldn't capture that site. It may block automated visitors or be down. Try another URL or upload a screenshot instead.";
+  }
+  if (status === 429 || status === 403) {
+    return 'Our AI roasters are slammed right now. Give it a minute and try again.';
+  }
+  return 'Something broke on our side while roasting. Try again in a moment.';
+}
+
 export async function POST(req: NextRequest) {
   const encoder = new TextEncoder();
 
@@ -207,8 +220,8 @@ export async function POST(req: NextRequest) {
           },
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Analysis failed. Try again.';
-        send({ type: 'error', payload: { message } });
+        console.error('[analyze] failed:', err);
+        send({ type: 'error', payload: { message: userFacingError(err) } });
       } finally {
         controller.close();
       }
