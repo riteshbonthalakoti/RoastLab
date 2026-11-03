@@ -50,6 +50,7 @@ export interface DimensionResult {
   score: number; // 0–100
   findings: Finding[];
   summary: string;
+  failed?: boolean; // set when every provider failed for this dimension
 }
 
 export interface AuditResult {
@@ -205,34 +206,36 @@ async function analyzeDimension(
   const response = await provider.client.chat.completions.create({
     model: provider.model,
     messages,
-    max_tokens: 1000,
+    max_tokens: 1800,
     temperature: 0.85,
   });
 
-  const text = response.choices[0]?.message?.content ?? '';
+  const parsed = parseDimensionJson(response.choices[0]?.message?.content ?? '');
+  if (!parsed) {
+    // Throwing (not returning a fake score) lets withFallback try the next provider.
+    throw new Error(`${provider.name} returned output that is not valid audit JSON`);
+  }
+  parsed.dimension = dimension;
+  return parsed;
+}
 
-  // Strip markdown fences if model adds them anyway
-  const cleaned = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-
+/** Tolerates reasoning blocks, markdown fences and prose around the JSON; null if unusable. */
+export function parseDimensionJson(raw: string): DimensionResult | null {
+  const noThink = raw.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  const first = noThink.indexOf('{');
+  const last = noThink.lastIndexOf('}');
+  if (first === -1 || last <= first) return null;
   try {
-    const parsed = JSON.parse(cleaned) as DimensionResult;
-    // Ensure score is in range
-    parsed.score = Math.max(0, Math.min(100, Math.round(parsed.score)));
-    return parsed;
-  } catch {
-    // Fallback if JSON parse fails
+    const obj = JSON.parse(noThink.slice(first, last + 1)) as Partial<DimensionResult>;
+    if (typeof obj.score !== 'number' || !Number.isFinite(obj.score) || !Array.isArray(obj.findings)) return null;
     return {
-      dimension,
-      score: 50,
-      summary: 'Analysis returned an unexpected format.',
-      findings: [
-        {
-          severity: 'medium',
-          title: 'Could not parse analysis',
-          action: 'Try re-running the audit.',
-        },
-      ],
+      dimension: obj.dimension as DimensionKey,
+      score: Math.max(0, Math.min(100, Math.round(obj.score))),
+      summary: typeof obj.summary === 'string' ? obj.summary : '',
+      findings: obj.findings,
     };
+  } catch {
+    return null;
   }
 }
 
@@ -257,20 +260,37 @@ export async function runAudit(params: {
 
   const results: DimensionResult[] = [];
   let lastProvider = 'unknown';
+  let succeeded = 0;
 
   // Analyze dimensions sequentially to avoid hammering rate limits
   for (const dim of dimensions) {
-    const { result, providerUsed } = await withFallback((provider) =>
-      analyzeDimension(provider, dim, imageBase64, mimeType, url, pageContent)
-    );
+    let result: DimensionResult;
+    let providerUsed = lastProvider;
+    try {
+      ({ result, providerUsed } = await withFallback((provider) =>
+        analyzeDimension(provider, dim, imageBase64, mimeType, url, pageContent)
+      ));
+      succeeded++;
+    } catch (err) {
+      // Every provider is failing for the very first dimension: the rest will too, so stop early.
+      if (succeeded === 0) throw err;
+      result = {
+        dimension: dim,
+        score: 0,
+        summary: 'This dimension could not be analyzed.',
+        findings: [{ severity: 'medium', title: 'Analysis unavailable', action: 'Re-run the audit to retry this dimension.' }],
+        failed: true,
+      };
+    }
     lastProvider = providerUsed;
     results.push(result);
     onDimensionComplete?.(result, providerUsed);
   }
 
+  const scored = results.filter((r) => !r.failed);
   const overallScore =
-    results.length > 0
-      ? Math.round(results.reduce((sum, r) => sum + r.score, 0) / results.length)
+    scored.length > 0
+      ? Math.round(scored.reduce((sum, r) => sum + r.score, 0) / scored.length)
       : 0;
 
   return {
