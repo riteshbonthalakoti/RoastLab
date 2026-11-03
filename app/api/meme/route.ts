@@ -32,10 +32,11 @@ export async function GET(req: NextRequest) {
   const exclude = new Set((p.get('exclude') ?? '').split(',').filter(Boolean).slice(0, 40));
   if (!q) return NextResponse.json({ url: null });
 
-  const attempts: (() => Promise<Meme | null>)[] = [
-    () => fromGiphy(q, lang, seed, exclude),
-    () => fromReddit(lang, mood, seed, exclude),
-  ];
+  // English: Giphy only (the client falls back to a finding-specific caption meme). Random Reddit
+  // posts are off-topic for a website roast. Hindi/Telugu: Reddit's Indian-meme communities are the
+  // main source of real regional memes, so they stay as the fallback.
+  const attempts: (() => Promise<Meme | null>)[] = [() => fromGiphy(q, lang, seed, exclude)];
+  if (lang !== 'en') attempts.push(() => fromReddit(lang, mood, seed, exclude));
   // Thin Telugu pools: fall back to the wider Indian-meme pool before giving up.
   if (lang === 'te') attempts.push(() => fromReddit('hi', mood, seed, exclude));
 
