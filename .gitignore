@@ -44,3 +44,6 @@ yarn-error.log*
 next-env.d.ts
 
 .vercel
+
+# crawler service deps
+/crawler/node_modules

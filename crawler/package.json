@@ -1,0 +1,16 @@
+{
+  "name": "roastlab-crawler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless-browser crawler service: screenshots + layout/theme facts + DESIGN.md for a URL",
+  "scripts": {
+    "start": "node src/server.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.63.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

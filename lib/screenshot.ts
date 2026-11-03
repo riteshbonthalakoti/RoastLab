@@ -1,6 +1,7 @@
 import { put } from '@vercel/blob';
 import sharp from 'sharp';
 import { getFirecrawl, downloadScreenshot } from './firecrawl';
+import { getCrawl, uploadCrawlSections } from './crawler';
 
 async function getFirecrawlShot(url: string): Promise<{ buffer: Buffer; screenshotUrl: string } | null> {
   const fc = await getFirecrawl(url);
@@ -31,6 +32,14 @@ export async function captureScreenshot(url: string): Promise<{
   mimeType: 'image/jpeg';
   screenshotUrl: string;
 }> {
+  // Self-hosted crawler (when configured): its first 900px section is the hero shot.
+  const cr = await getCrawl(url);
+  const hero = cr?.screenshots.desktopSections[0];
+  if (cr && hero) {
+    const urls = await uploadCrawlSections(cr);
+    return { base64: hero, mimeType: 'image/jpeg', screenshotUrl: urls[0] ?? `data:image/jpeg;base64,${hero}` };
+  }
+
   // Firecrawl (when configured): crop the hero (top 900px) out of its full-page capture.
   const fcShot = await getFirecrawlShot(url);
   if (fcShot) {
@@ -141,6 +150,13 @@ export async function captureMultipleScreenshots(url: string): Promise<string[]>
     } catch { return null; }
   }
 
+  // Self-hosted crawler sections are already 900px crops; reuse the uploaded URLs.
+  const cr = await getCrawl(url);
+  if (cr) {
+    const urls = await uploadCrawlSections(cr);
+    if (urls.length > 0) return urls;
+  }
+
   // Firecrawl first (handles bot protection + JS rendering); legacy race only if it yields nothing.
   const fcShot = await getFirecrawlShot(url);
   let imageBuffer: Buffer | null = fcShot?.buffer ?? null;
@@ -225,6 +241,10 @@ export async function captureMultipleScreenshots(url: string): Promise<string[]>
  * Free, no API key, JS-rendered, strips nav/footer noise, fails gracefully.
  */
 export async function crawlPage(url: string): Promise<string> {
+  // The crawler's DESIGN.md already contains content, theme, layout, a11y, mobile, perf and subpages.
+  const cr = await getCrawl(url);
+  if (cr) return cr.designMd.slice(0, 16_000);
+
   // Firecrawl markdown keeps nav/header/footer (CTAs, trust badges) that Jina's selector strips.
   const fc = await getFirecrawl(url);
   if (fc && fc.markdown.length > 200) return fc.markdown.slice(0, 10_000);
@@ -270,6 +290,7 @@ export async function crawlPage(url: string): Promise<string> {
  * Free — direct HTTP fetch, no API key needed.
  */
 export async function extractSiteData(url: string): Promise<string> {
+  if (await getCrawl(url)) return ''; // covered by DESIGN.md
   try {
     const fc = await getFirecrawl(url);
     let html = fc?.rawHtml ?? '';
@@ -339,6 +360,7 @@ export async function extractSiteData(url: string): Promise<string> {
  * Only for premium audits.
  */
 export async function crawlSubpages(url: string): Promise<string> {
+  if (await getCrawl(url)) return ''; // covered by DESIGN.md
   let origin: string;
   try {
     origin = new URL(url).origin;
