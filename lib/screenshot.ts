@@ -35,7 +35,17 @@ export async function captureScreenshot(url: string): Promise<{
         const candidate = Buffer.from(buffer);
         if (!await isBotBlockPage(candidate)) {
           const base64 = candidate.toString('base64');
-          return { base64, mimeType: 'image/jpeg', screenshotUrl: thumUrl };
+          // The browser re-requesting the slow thum.io URL often fails to render; serve our own copy.
+          let screenshotUrl = thumUrl;
+          if (process.env.BLOB_READ_WRITE_TOKEN) {
+            try {
+              const blob = await put(`screenshots/hero-${Date.now()}.jpg`, candidate, { access: 'public', contentType: 'image/jpeg' });
+              screenshotUrl = blob.url;
+            } catch {
+              // keep the thum.io URL
+            }
+          }
+          return { base64, mimeType: 'image/jpeg', screenshotUrl };
         }
       }
     }
