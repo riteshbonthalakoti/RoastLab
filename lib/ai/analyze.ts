@@ -209,7 +209,8 @@ async function analyzeDimension(
     max_tokens: 3000,
     temperature: 0.85,
     ...(provider.jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
-  });
+    ...provider.extraParams,
+  } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming);
 
   const choice = response.choices[0];
   const content = choice?.message?.content ?? '';
